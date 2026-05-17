@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require('express');
 const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
@@ -10,15 +11,19 @@ const PORT = process.env.PORT || 3000;
 // ── Cloudinary config ──────────────────────────────────────────────────────
 // Replace these with your real Cloudinary credentials
 cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME || 'YOUR_CLOUD_NAME',
-  api_key:    process.env.CLOUDINARY_API_KEY    || 'YOUR_API_KEY',
-  api_secret: process.env.CLOUDINARY_API_SECRET || 'YOUR_API_SECRET',
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key:    process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
 // ── Middleware ─────────────────────────────────────────────────────────────
 app.use(cors());
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'DELETE'],
+  allowedHeaders: ['Content-Type'],
+}));
 app.use(express.json());
-app.use(express.static(path.join(__dirname, 'public')));
 
 // Multer: store file in memory so we can stream to Cloudinary
 const upload = multer({
@@ -226,10 +231,6 @@ app.delete('/api/books/:publicId(*)', async (req, res) => {
   }
 });
 
-// ── Serve frontends ────────────────────────────────────────────────────────
-app.get('/', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
-app.get('/admin', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'admin.html')));
-
 // ── Error handler ──────────────────────────────────────────────────────────
 app.use((err, _req, res, _next) => {
   console.error(err);
@@ -238,6 +239,4 @@ app.use((err, _req, res, _next) => {
 
 app.listen(PORT, () => {
   console.log(`\n🟢 ZamLearn server running at http://localhost:${PORT}`);
-  console.log(`   Student App → http://localhost:${PORT}/`);
-  console.log(`   Admin App   → http://localhost:${PORT}/admin\n`);
 });
