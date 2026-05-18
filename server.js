@@ -11,9 +11,9 @@ const PORT = process.env.PORT || 3000;
 // ── Cloudinary config ──────────────────────────────────────────────────────
 // Replace these with your real Cloudinary credentials
 cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key:    process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET,
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME || 'YOUR_CLOUD_NAME',
+  api_key:    process.env.CLOUDINARY_API_KEY    || 'YOUR_API_KEY',
+  api_secret: process.env.CLOUDINARY_API_SECRET || 'YOUR_API_SECRET',
 });
 
 // ── Middleware ─────────────────────────────────────────────────────────────
@@ -67,6 +67,7 @@ app.post('/api/pastpapers/upload', upload.single('pdf'), async (req, res) => {
       resource_type: 'raw',
       public_id: publicId,
       format: 'pdf',
+      access_mode: 'public',          // ← make file publicly accessible
       context: `grade=${grade}|subject=${subject}|year=${year}`,
       tags: ['pastpaper', `grade_${grade}`, `year_${year}`, subject.toLowerCase()],
     });
@@ -106,13 +107,21 @@ app.get('/api/pastpapers', async (req, res) => {
 
     let papers = result.resources.map(r => {
       const ctx = r.context?.custom || {};
+      // Generate a signed URL valid for 1 hour — works for both public and restricted files
+      const signedUrl = cloudinary.url(r.public_id, {
+        resource_type: 'raw',
+        type: 'upload',
+        secure: true,
+        sign_url: true,
+        expires_at: Math.floor(Date.now() / 1000) + 3600,
+      });
       return {
-        public_id: r.public_id,
-        url: r.secure_url,
-        grade:   ctx.grade   || '',
-        subject: ctx.subject || '',
-        year:    ctx.year    || '',
-        bytes:   r.bytes,
+        public_id:  r.public_id,
+        url:        signedUrl,
+        grade:      ctx.grade   || '',
+        subject:    ctx.subject || '',
+        year:       ctx.year    || '',
+        bytes:      r.bytes,
         created_at: r.created_at,
       };
     });
@@ -162,6 +171,7 @@ app.post('/api/books/upload', upload.single('pdf'), async (req, res) => {
       resource_type: 'raw',
       public_id: publicId,
       format: 'pdf',
+      access_mode: 'public',          // ← make file publicly accessible
       context: `grade=${grade}|title=${title}`,
       tags: ['book', `grade_${grade}`],
     });
@@ -200,12 +210,20 @@ app.get('/api/books', async (req, res) => {
 
     let books = result.resources.map(r => {
       const ctx = r.context?.custom || {};
+      // Generate a signed URL valid for 1 hour
+      const signedUrl = cloudinary.url(r.public_id, {
+        resource_type: 'raw',
+        type: 'upload',
+        secure: true,
+        sign_url: true,
+        expires_at: Math.floor(Date.now() / 1000) + 3600,
+      });
       return {
-        public_id: r.public_id,
-        url: r.secure_url,
-        grade: ctx.grade || '',
-        title: ctx.title || '',
-        bytes: r.bytes,
+        public_id:  r.public_id,
+        url:        signedUrl,
+        grade:      ctx.grade || '',
+        title:      ctx.title || '',
+        bytes:      r.bytes,
         created_at: r.created_at,
       };
     });
