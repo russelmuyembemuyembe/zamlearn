@@ -138,6 +138,28 @@ app.get('/api/pastpapers', async (req, res) => {
   }
 });
 
+// Update a past paper's metadata
+app.put('/api/pastpapers/:publicId(*)/update', async (req, res) => {
+  try {
+    const publicId = req.params.publicId;
+    const { grade, subject, year } = req.body;
+    if (!grade || !subject || !year)
+      return res.status(400).json({ error: 'grade, subject, and year are required' });
+
+    await cloudinary.uploader.explicit(publicId, {
+      resource_type: 'raw',
+      type: 'upload',
+      context: `grade=${grade}|subject=${subject}|year=${year}`,
+      tags: ['pastpaper', `grade_${grade}`, `year_${year}`, subject.toLowerCase()],
+    });
+
+    res.json({ success: true, message: 'Past paper updated' });
+  } catch (err) {
+    console.error('Update error:', err);
+    res.status(500).json({ error: err.message || 'Update failed' });
+  }
+});
+
 // Delete a past paper
 app.delete('/api/pastpapers/:publicId(*)', async (req, res) => {
   try {
@@ -243,6 +265,34 @@ app.get('/api/books', async (req, res) => {
     res.status(500).json({ error: err.message || 'Failed to fetch books' });
   }
 });
+// Update a book's metadata
+app.put('/api/books/:publicId(*)/update', async (req, res) => {
+  try {
+    const publicId = req.params.publicId;
+    const { grade, title, category } = req.body;
+    if (!grade || !title)
+      return res.status(400).json({ error: 'grade and title are required' });
+
+    const contextStr = [`grade=${grade}`, `title=${title}`];
+    if (category) contextStr.push(`category=${category}`);
+
+    const tags = ['book', `grade_${grade}`];
+    if (category) tags.push(category.toLowerCase().replace(/\s+/g,'_'));
+
+    await cloudinary.uploader.explicit(publicId, {
+      resource_type: 'raw',
+      type: 'upload',
+      context: contextStr.join('|'),
+      tags,
+    });
+
+    res.json({ success: true, message: 'Book updated' });
+  } catch (err) {
+    console.error('Update error:', err);
+    res.status(500).json({ error: err.message || 'Update failed' });
+  }
+});
+
 // Delete a book
 app.delete('/api/books/:publicId(*)', async (req, res) => {
   try {
