@@ -159,7 +159,7 @@ app.post('/api/books/upload', upload.single('pdf'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No PDF file provided' });
 
-    const { grade, title } = req.body;
+    const { grade, title, category } = req.body;
     if (!grade || !title)
       return res.status(400).json({ error: 'grade and title are required' });
 
@@ -167,13 +167,19 @@ app.post('/api/books/upload', upload.single('pdf'), async (req, res) => {
     const safeTitle = title.replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_-]/g, '');
     const publicId  = `zamlearn/books/${safeGrade}/${safeTitle}_${Date.now()}`;
 
+    const contextStr = [`grade=${grade}`, `title=${title}`];
+    if (category) contextStr.push(`category=${category}`);
+
+    const tags = ['book', `grade_${grade}`];
+    if (category) tags.push(category.toLowerCase().replace(/\s+/g,'_'));
+
     const result = await uploadToCloudinary(req.file.buffer, {
       resource_type: 'raw',
       public_id: publicId,
       format: 'pdf',
-      access_mode: 'public',          // ← make file publicly accessible
-      context: `grade=${grade}|title=${title}`,
-      tags: ['book', `grade_${grade}`],
+      access_mode: 'public',
+      context: contextStr.join('|'),
+      tags,
     });
 
     res.json({
@@ -184,6 +190,7 @@ app.post('/api/books/upload', upload.single('pdf'), async (req, res) => {
         url: result.secure_url,
         grade,
         title,
+        category: category || '',
         bytes: result.bytes,
       },
     });
@@ -196,9 +203,8 @@ app.post('/api/books/upload', upload.single('pdf'), async (req, res) => {
 // List books
 app.get('/api/books', async (req, res) => {
   try {
-    const { grade } = req.query;
+    const { grade, category } = req.query;
 
-    // Use Resources API (works on all free Cloudinary plans)
     const result = await cloudinary.api.resources({
       resource_type: 'raw',
       type: 'upload',
@@ -210,7 +216,6 @@ app.get('/api/books', async (req, res) => {
 
     let books = result.resources.map(r => {
       const ctx = r.context?.custom || {};
-      // Generate a signed URL valid for 1 hour
       const signedUrl = cloudinary.url(r.public_id, {
         resource_type: 'raw',
         type: 'upload',
@@ -221,15 +226,16 @@ app.get('/api/books', async (req, res) => {
       return {
         public_id:  r.public_id,
         url:        signedUrl,
-        grade:      ctx.grade || '',
-        title:      ctx.title || '',
+        grade:      ctx.grade    || '',
+        title:      ctx.title    || '',
+        category:   ctx.category || '',
         bytes:      r.bytes,
         created_at: r.created_at,
       };
     });
 
-    // Filter in-memory
-    if (grade) books = books.filter(b => b.grade === grade);
+    if (grade)    books = books.filter(b => b.grade === grade);
+    if (category) books = books.filter(b => b.category.toLowerCase() === category.toLowerCase());
 
     res.json({ success: true, count: books.length, data: books });
   } catch (err) {
