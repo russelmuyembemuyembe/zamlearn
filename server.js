@@ -138,13 +138,12 @@ app.get('/api/pastpapers', async (req, res) => {
   }
 });
 
-// Update a past paper's metadata
-app.put('/api/pastpapers/:publicId(*)/update', async (req, res) => {
+// Update a past paper's metadata (publicId sent in body to avoid URL encoding issues)
+app.put('/api/pastpapers/update', async (req, res) => {
   try {
-    const publicId = req.params.publicId;
-    const { grade, subject, year } = req.body;
-    if (!grade || !subject || !year)
-      return res.status(400).json({ error: 'grade, subject, and year are required' });
+    const { publicId, grade, subject, year } = req.body;
+    if (!publicId || !grade || !subject || !year)
+      return res.status(400).json({ error: 'publicId, grade, subject, and year are required' });
 
     await cloudinary.uploader.explicit(publicId, {
       resource_type: 'raw',
@@ -265,13 +264,12 @@ app.get('/api/books', async (req, res) => {
     res.status(500).json({ error: err.message || 'Failed to fetch books' });
   }
 });
-// Update a book's metadata
-app.put('/api/books/:publicId(*)/update', async (req, res) => {
+// Update a book's metadata (publicId sent in body to avoid URL encoding issues)
+app.put('/api/books/update', async (req, res) => {
   try {
-    const publicId = req.params.publicId;
-    const { grade, title, category } = req.body;
-    if (!grade || !title)
-      return res.status(400).json({ error: 'grade and title are required' });
+    const { publicId, grade, title, category } = req.body;
+    if (!publicId || !grade || !title)
+      return res.status(400).json({ error: 'publicId, grade, and title are required' });
 
     const contextStr = [`grade=${grade}`, `title=${title}`];
     if (category) contextStr.push(`category=${category}`);
