@@ -20,7 +20,7 @@ cloudinary.config({
 app.use(cors());
 app.use(cors({
   origin: '*',
-  methods: ['GET', 'POST', 'DELETE'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE'],
   allowedHeaders: ['Content-Type'],
 }));
 app.use(express.json());
@@ -218,6 +218,23 @@ app.post('/api/books/upload', upload.single('pdf'), async (req, res) => {
   } catch (err) {
     console.error('Upload error:', err);
     res.status(500).json({ error: err.message || 'Upload failed' });
+  }
+});
+
+// ── DEBUG: inspect raw Cloudinary response shape (remove after fixing) ────
+app.get('/api/debug/books-raw', async (req, res) => {
+  try {
+    const result = await cloudinary.api.resources({
+      resource_type: 'raw',
+      type: 'upload',
+      prefix: 'zamlearn/books/',
+      max_results: 5,
+      context: true,
+      tags: true,
+    });
+    res.json({ success: true, raw: result.resources });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
