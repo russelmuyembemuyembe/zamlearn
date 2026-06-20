@@ -35,6 +35,23 @@ const upload = multer({
   },
 });
 
+// ── Helper: parse Cloudinary's context field defensively ──────────────────
+// Handles all shapes we've seen: nested under .custom, flat object, or a
+// raw "key=value|key=value" string (from resources uploaded before this fix).
+function parseContext(rawContext) {
+  if (!rawContext) return {};
+  if (typeof rawContext === 'string') {
+    const out = {};
+    rawContext.split('|').forEach(pair => {
+      const idx = pair.indexOf('=');
+      if (idx > -1) out[pair.slice(0, idx).trim()] = pair.slice(idx + 1).trim();
+    });
+    return out;
+  }
+  if (rawContext.custom) return rawContext.custom;
+  return rawContext;
+}
+
 // ── Helper: upload buffer to Cloudinary ───────────────────────────────────
 function uploadToCloudinary(buffer, options) {
   return new Promise((resolve, reject) => {
@@ -68,7 +85,7 @@ app.post('/api/pastpapers/upload', upload.single('pdf'), async (req, res) => {
       public_id: publicId,
       format: 'pdf',
       access_mode: 'public',          // ← make file publicly accessible
-      context: `grade=${grade}|subject=${subject}|year=${year}`,
+      context: { grade: grade, subject: subject, year: year }, // object — SDK handles escaping
       tags: ['pastpaper', `grade_${grade}`, `year_${year}`, subject.toLowerCase()],
     });
 
@@ -106,7 +123,7 @@ app.get('/api/pastpapers', async (req, res) => {
     });
 
     let papers = result.resources.map(r => {
-      const ctx = r.context?.custom || {};
+      const ctx = parseContext(r.context);
       // Generate a signed URL valid for 1 hour — works for both public and restricted files
       const signedUrl = cloudinary.url(r.public_id, {
         resource_type: 'raw',
@@ -148,7 +165,7 @@ app.put('/api/pastpapers/update', async (req, res) => {
     await cloudinary.uploader.explicit(publicId, {
       resource_type: 'raw',
       type: 'upload',
-      context: `grade=${grade}|subject=${subject}|year=${year}`,
+      context: { grade: grade, subject: subject, year: year },
       tags: ['pastpaper', `grade_${grade}`, `year_${year}`, subject.toLowerCase()],
     });
 
@@ -188,8 +205,8 @@ app.post('/api/books/upload', upload.single('pdf'), async (req, res) => {
     const safeTitle = title.replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_-]/g, '');
     const publicId  = `zamlearn/books/${safeGrade}/${safeTitle}_${Date.now()}`;
 
-    const contextStr = [`grade=${grade}`, `title=${title}`];
-    if (category) contextStr.push(`category=${category}`);
+    const contextObj = { grade: grade, title: title };
+    if (category) contextObj.category = category;
 
     const tags = ['book', `grade_${grade}`];
     if (category) tags.push(category.toLowerCase().replace(/\s+/g,'_'));
@@ -199,7 +216,7 @@ app.post('/api/books/upload', upload.single('pdf'), async (req, res) => {
       public_id: publicId,
       format: 'pdf',
       access_mode: 'public',
-      context: contextStr.join('|'),
+      context: contextObj, // object — SDK handles escaping correctly
       tags,
     });
 
@@ -253,9 +270,7 @@ app.get('/api/books', async (req, res) => {
     });
 
     let books = result.resources.map(r => {
-      // Cloudinary sometimes returns context nested under .custom, sometimes flat —
-      // handle both shapes so category/grade/title are never silently dropped.
-      const ctx = (r.context && r.context.custom) ? r.context.custom : (r.context || {});
+      const ctx = parseContext(r.context);
       const signedUrl = cloudinary.url(r.public_id, {
         resource_type: 'raw',
         type: 'upload',
@@ -290,8 +305,8 @@ app.put('/api/books/update', async (req, res) => {
     if (!publicId || !grade || !title)
       return res.status(400).json({ error: 'publicId, grade, and title are required' });
 
-    const contextStr = [`grade=${grade}`, `title=${title}`];
-    if (category) contextStr.push(`category=${category}`);
+    const contextObj = { grade: grade, title: title };
+    if (category) contextObj.category = category;
 
     const tags = ['book', `grade_${grade}`];
     if (category) tags.push(category.toLowerCase().replace(/\s+/g,'_'));
@@ -299,7 +314,7 @@ app.put('/api/books/update', async (req, res) => {
     await cloudinary.uploader.explicit(publicId, {
       resource_type: 'raw',
       type: 'upload',
-      context: contextStr.join('|'),
+      context: contextObj,
       tags,
     });
 
