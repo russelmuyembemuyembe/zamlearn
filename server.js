@@ -236,7 +236,9 @@ app.get('/api/books', async (req, res) => {
     });
 
     let books = result.resources.map(r => {
-      const ctx = r.context?.custom || {};
+      // Cloudinary sometimes returns context nested under .custom, sometimes flat —
+      // handle both shapes so category/grade/title are never silently dropped.
+      const ctx = (r.context && r.context.custom) ? r.context.custom : (r.context || {});
       const signedUrl = cloudinary.url(r.public_id, {
         resource_type: 'raw',
         type: 'upload',
@@ -256,7 +258,7 @@ app.get('/api/books', async (req, res) => {
     });
 
     if (grade)    books = books.filter(b => b.grade === grade);
-    if (category) books = books.filter(b => b.category.toLowerCase() === category.toLowerCase());
+    if (category) books = books.filter(b => (b.category || '').toLowerCase() === category.toLowerCase());
 
     res.json({ success: true, count: books.length, data: books });
   } catch (err) {
