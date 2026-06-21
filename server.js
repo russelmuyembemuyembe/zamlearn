@@ -275,6 +275,8 @@ app.post('/api/books/upload', upload.single('pdf'), async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'No PDF file provided' });
 
     const { grade, title, category } = req.body;
+    console.log('[UPLOAD book] RAW req.body received:', JSON.stringify(req.body));
+
     if (!grade || !title)
       return res.status(400).json({ error: 'grade and title are required' });
 
@@ -365,32 +367,44 @@ app.get('/api/books', async (req, res) => {
 app.put('/api/books/update', async (req, res) => {
   try {
     const { publicId, grade, title, category } = req.body;
+    console.log('[UPDATE book] RAW req.body received:', JSON.stringify(req.body));
+
     if (!publicId || !grade || !title)
       return res.status(400).json({ error: 'publicId, grade, and title are required' });
 
+    // Treat category as "intended" if the client sent any non-empty string at all
+    const categoryProvided = typeof category === 'string' && category.trim().length > 0;
+    const cleanCategory = categoryProvided ? category.trim() : '';
+
     const contextObj = { grade: String(grade), title: String(title) };
-    if (category) contextObj.category = String(category);
+    if (categoryProvided) contextObj.category = cleanCategory;
 
     const tags = ['book', `grade_${grade}`];
-    if (category) tags.push(String(category).toLowerCase().replace(/\s+/g, '_'));
+    if (categoryProvided) tags.push(cleanCategory.toLowerCase().replace(/\s+/g, '_'));
+
+    console.log('[UPDATE book] contextObj being sent to Cloudinary:', JSON.stringify(contextObj));
 
     await updateResourceContext(publicId, 'raw', contextObj, tags);
 
-    // Self-verify: read the resource back immediately to confirm context stuck
+    // Self-verify: read the resource back immediately to confirm context stuck.
+    // This check is now STRICT — if a category was provided but didn't come
+    // back, this reports failure honestly instead of silently passing.
     const check = await cloudinary.api.resource(publicId, { resource_type: 'raw', type: 'upload', context: true });
     const verifiedCtx = parseContext(check.context);
     console.log(`[UPDATE book] ${publicId} wrote →`, JSON.stringify(contextObj), 'readback →', JSON.stringify(verifiedCtx));
 
-    const ok = verifiedCtx.grade === String(grade)
-      && verifiedCtx.title === String(title)
-      && (!category || verifiedCtx.category === String(category));
-    if (!ok) {
+    const gradeOk    = verifiedCtx.grade === String(grade);
+    const titleOk     = verifiedCtx.title === String(title);
+    const categoryOk = categoryProvided ? (verifiedCtx.category === cleanCategory) : true;
+
+    if (!gradeOk || !titleOk || !categoryOk) {
       return res.status(500).json({
-        error: 'Update sent but Cloudinary did not persist it. Readback: ' + JSON.stringify(verifiedCtx),
+        error: `Update did not fully persist. grade_ok=${gradeOk} title_ok=${titleOk} category_ok=${categoryOk}. ` +
+               `Sent: ${JSON.stringify(contextObj)} — Cloudinary has: ${JSON.stringify(verifiedCtx)}`,
       });
     }
 
-    res.json({ success: true, message: 'Book updated', verified: verifiedCtx });
+    res.json({ success: true, message: 'Book updated', verified: verifiedCtx, sentBody: req.body });
   } catch (err) {
     console.error('[UPDATE book] error:', err);
     res.status(500).json({ error: err.message || 'Update failed' });
