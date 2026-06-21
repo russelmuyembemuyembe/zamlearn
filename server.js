@@ -137,6 +137,46 @@ app.post('/api/pastpapers/upload', upload.single('pdf'), async (req, res) => {
   }
 });
 
+// ── DEBUG: raw, zero-abstraction context update test ──────────────────────
+// Calls cloudinary.api.update directly with no helpers, no parsing, nothing
+// hidden. Visit with ?publicId=zamlearn/books/... to test on a real resource.
+app.get('/api/debug/raw-update-test', async (req, res) => {
+  const { publicId } = req.query;
+  if (!publicId) return res.status(400).json({ error: 'Add ?publicId=zamlearn/books/yourfile to the URL' });
+
+  const log = [];
+  try {
+    log.push('Step 1: Calling cloudinary.api.update() directly...');
+    const updateResult = await new Promise((resolve, reject) => {
+      cloudinary.api.update(
+        publicId,
+        {
+          resource_type: 'raw',
+          type: 'upload',
+          context: { test_field: 'hello_world_' + Date.now() },
+        },
+        (err, result) => err ? reject(err) : resolve(result)
+      );
+    });
+    log.push('Step 1 RESPONSE from Cloudinary: ' + JSON.stringify(updateResult));
+
+    log.push('Step 2: Reading the resource back...');
+    const readBack = await new Promise((resolve, reject) => {
+      cloudinary.api.resource(
+        publicId,
+        { resource_type: 'raw', type: 'upload', context: true },
+        (err, result) => err ? reject(err) : resolve(result)
+      );
+    });
+    log.push('Step 2 RESPONSE from Cloudinary: ' + JSON.stringify(readBack.context));
+
+    res.json({ success: true, log, updateResult, readBackContext: readBack.context });
+  } catch (err) {
+    log.push('ERROR: ' + (err.message || JSON.stringify(err)));
+    res.status(500).json({ success: false, log, error: err.message, fullError: err });
+  }
+});
+
 // List past papers (with optional filters)
 app.get('/api/pastpapers', async (req, res) => {
   try {
