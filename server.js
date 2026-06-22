@@ -88,6 +88,36 @@ function updateResourceContext(publicId, resourceType, contextObj, tags) {
   });
 }
 
+// Fetch ALL resources matching a prefix, following Cloudinary's pagination
+// cursor until exhausted. Cloudinary caps each request at max_results:500,
+// so without this, anything beyond the first 500 uploads would be silently
+// missing from lists/searches/filters.
+async function fetchAllResources(prefix) {
+  let allResources = [];
+  let cursor = undefined;
+  let page = 0;
+  const MAX_PAGES = 50; // safety cap: 50 × 500 = 25,000 resources max
+
+  do {
+    const opts = {
+      resource_type: 'raw',
+      type: 'upload',
+      prefix,
+      max_results: 500,
+      context: true,
+      tags: true,
+    };
+    if (cursor) opts.next_cursor = cursor;
+
+    const result = await cloudinary.api.resources(opts);
+    allResources = allResources.concat(result.resources);
+    cursor = result.next_cursor;
+    page++;
+  } while (cursor && page < MAX_PAGES);
+
+  return allResources;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  PAST PAPERS
 // ═══════════════════════════════════════════════════════════════════════════
@@ -117,7 +147,6 @@ app.post('/api/pastpapers/upload', upload.single('pdf'), async (req, res) => {
       tags,
     });
 
-    console.log(`[UPLOAD paper] ${publicId} context →`, JSON.stringify(contextObj));
 
     res.json({
       success: true,
@@ -137,61 +166,14 @@ app.post('/api/pastpapers/upload', upload.single('pdf'), async (req, res) => {
   }
 });
 
-// ── DEBUG: raw, zero-abstraction context update test ──────────────────────
-// Calls cloudinary.api.update directly with no helpers, no parsing, nothing
-// hidden. Visit with ?publicId=zamlearn/books/... to test on a real resource.
-app.get('/api/debug/raw-update-test', async (req, res) => {
-  const { publicId } = req.query;
-  if (!publicId) return res.status(400).json({ error: 'Add ?publicId=zamlearn/books/yourfile to the URL' });
-
-  const log = [];
-  try {
-    log.push('Step 1: Calling cloudinary.api.update() directly...');
-    const updateResult = await new Promise((resolve, reject) => {
-      cloudinary.api.update(
-        publicId,
-        {
-          resource_type: 'raw',
-          type: 'upload',
-          context: { test_field: 'hello_world_' + Date.now() },
-        },
-        (err, result) => err ? reject(err) : resolve(result)
-      );
-    });
-    log.push('Step 1 RESPONSE from Cloudinary: ' + JSON.stringify(updateResult));
-
-    log.push('Step 2: Reading the resource back...');
-    const readBack = await new Promise((resolve, reject) => {
-      cloudinary.api.resource(
-        publicId,
-        { resource_type: 'raw', type: 'upload', context: true },
-        (err, result) => err ? reject(err) : resolve(result)
-      );
-    });
-    log.push('Step 2 RESPONSE from Cloudinary: ' + JSON.stringify(readBack.context));
-
-    res.json({ success: true, log, updateResult, readBackContext: readBack.context });
-  } catch (err) {
-    log.push('ERROR: ' + (err.message || JSON.stringify(err)));
-    res.status(500).json({ success: false, log, error: err.message, fullError: err });
-  }
-});
-
 // List past papers (with optional filters)
 app.get('/api/pastpapers', async (req, res) => {
   try {
     const { grade, subject, year } = req.query;
 
-    const result = await cloudinary.api.resources({
-      resource_type: 'raw',
-      type: 'upload',
-      prefix: 'zamlearn/pastpapers/',
-      max_results: 500,
-      context: true,
-      tags: true,
-    });
+    const resources = await fetchAllResources('zamlearn/pastpapers/');
 
-    let papers = result.resources.map(r => {
+    let papers = resources.map(r => {
       const ctx = parseContext(r.context);
       const signedUrl = cloudinary.url(r.public_id, {
         resource_type: 'raw',
@@ -275,7 +257,6 @@ app.post('/api/books/upload', upload.single('pdf'), async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'No PDF file provided' });
 
     const { grade, title, category } = req.body;
-    console.log('[UPLOAD book] RAW req.body received:', JSON.stringify(req.body));
 
     if (!grade || !title)
       return res.status(400).json({ error: 'grade and title are required' });
@@ -299,7 +280,6 @@ app.post('/api/books/upload', upload.single('pdf'), async (req, res) => {
       tags,
     });
 
-    console.log(`[UPLOAD book] ${publicId} context →`, JSON.stringify(contextObj));
 
     res.json({
       success: true,
@@ -324,16 +304,9 @@ app.get('/api/books', async (req, res) => {
   try {
     const { grade, category } = req.query;
 
-    const result = await cloudinary.api.resources({
-      resource_type: 'raw',
-      type: 'upload',
-      prefix: 'zamlearn/books/',
-      max_results: 500,
-      context: true,
-      tags: true,
-    });
+    const resources = await fetchAllResources('zamlearn/books/');
 
-    let books = result.resources.map(r => {
+    let books = resources.map(r => {
       const ctx = parseContext(r.context);
       const signedUrl = cloudinary.url(r.public_id, {
         resource_type: 'raw',
@@ -367,7 +340,6 @@ app.get('/api/books', async (req, res) => {
 app.put('/api/books/update', async (req, res) => {
   try {
     const { publicId, grade, title, category } = req.body;
-    console.log('[UPDATE book] RAW req.body received:', JSON.stringify(req.body));
 
     if (!publicId || !grade || !title)
       return res.status(400).json({ error: 'publicId, grade, and title are required' });
@@ -382,7 +354,6 @@ app.put('/api/books/update', async (req, res) => {
     const tags = ['book', `grade_${grade}`];
     if (categoryProvided) tags.push(cleanCategory.toLowerCase().replace(/\s+/g, '_'));
 
-    console.log('[UPDATE book] contextObj being sent to Cloudinary:', JSON.stringify(contextObj));
 
     await updateResourceContext(publicId, 'raw', contextObj, tags);
 
@@ -420,43 +391,6 @@ app.delete('/api/books/:publicId(*)', async (req, res) => {
   } catch (err) {
     console.error('[DELETE book] error:', err);
     res.status(500).json({ error: err.message || 'Delete failed' });
-  }
-});
-
-// ── DEBUG: inspect raw Cloudinary response shape for one resource ─────────
-app.get('/api/debug/resource', async (req, res) => {
-  try {
-    const { publicId, resourceType } = req.query;
-    if (!publicId) return res.status(400).json({ error: 'publicId query param required' });
-    const result = await cloudinary.api.resource(publicId, {
-      resource_type: resourceType || 'raw',
-      type: 'upload',
-      context: true,
-      tags: true,
-    });
-    res.json({ success: true, raw: result, parsedContext: parseContext(result.context) });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.get('/api/debug/books-raw', async (req, res) => {
-  try {
-    const result = await cloudinary.api.resources({
-      resource_type: 'raw',
-      type: 'upload',
-      prefix: 'zamlearn/books/',
-      max_results: 10,
-      context: true,
-      tags: true,
-    });
-    res.json({
-      success: true,
-      raw: result.resources,
-      parsed: result.resources.map(r => ({ public_id: r.public_id, context: parseContext(r.context) })),
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
   }
 });
 
