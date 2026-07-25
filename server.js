@@ -256,8 +256,7 @@ app.post('/api/books/upload', upload.single('pdf'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No PDF file provided' });
 
-    const { grade, title, category, price } = req.body;
-
+    const { grade, title, category, whatsapp } = req.body;
     if (!grade || !title)
       return res.status(400).json({ error: 'grade and title are required' });
 
@@ -267,12 +266,11 @@ app.post('/api/books/upload', upload.single('pdf'), async (req, res) => {
 
     const contextObj = { grade: String(grade), title: String(title) };
     if (category) contextObj.category = String(category);
-    const parsedPrice = parseFloat(price || 0);
-    if (parsedPrice > 0) contextObj.price = String(parsedPrice.toFixed(2));
+    if (whatsapp) contextObj.whatsapp = String(whatsapp).trim();
 
     const tags = ['book', `grade_${grade}`];
     if (category) tags.push(String(category).toLowerCase().replace(/\s+/g, '_'));
-    if (parsedPrice > 0) tags.push('paid');
+    if (whatsapp) tags.push('whatsapp_required');
 
     const result = await uploadToCloudinary(req.file.buffer, {
       resource_type: 'raw',
@@ -283,18 +281,17 @@ app.post('/api/books/upload', upload.single('pdf'), async (req, res) => {
       tags,
     });
 
-
     res.json({
       success: true,
       message: 'Book uploaded successfully',
       data: {
         public_id: result.public_id,
-        url: result.secure_url,
-        grade: String(grade),
-        title: String(title),
-        category: category ? String(category) : '',
-        price: parsedPrice > 0 ? String(parsedPrice.toFixed(2)) : '0',
-        bytes: result.bytes,
+        url:       result.secure_url,
+        grade:     String(grade),
+        title:     String(title),
+        category:  category  ? String(category)  : '',
+        whatsapp:  whatsapp  ? String(whatsapp).trim() : '',
+        bytes:     result.bytes,
       },
     });
   } catch (err) {
@@ -322,10 +319,10 @@ app.get('/api/books', async (req, res) => {
       return {
         public_id:  r.public_id,
         url:        signedUrl,
-        grade:      ctx.grade    || '',
-        title:      ctx.title    || '',
-        category:   ctx.category || '',
-        price:      ctx.price    || '0',
+        grade:      ctx.grade     || '',
+        title:      ctx.title     || '',
+        category:   ctx.category  || '',
+        whatsapp:   ctx.whatsapp  || '',
         bytes:      r.bytes,
         created_at: r.created_at,
       };
@@ -344,42 +341,36 @@ app.get('/api/books', async (req, res) => {
 // Update a book's metadata
 app.put('/api/books/update', async (req, res) => {
   try {
-    const { publicId, grade, title, category, price } = req.body;
-
+    const { publicId, grade, title, category, whatsapp } = req.body;
     if (!publicId || !grade || !title)
       return res.status(400).json({ error: 'publicId, grade, and title are required' });
 
     const categoryProvided = typeof category === 'string' && category.trim().length > 0;
-    const cleanCategory = categoryProvided ? category.trim() : '';
-    const parsedPrice = parseFloat(price || 0);
+    const cleanCategory    = categoryProvided ? category.trim() : '';
+    const cleanWhatsapp    = typeof whatsapp === 'string' ? whatsapp.trim() : '';
 
     const contextObj = { grade: String(grade), title: String(title) };
     if (categoryProvided) contextObj.category = cleanCategory;
-    if (parsedPrice > 0) contextObj.price = String(parsedPrice.toFixed(2));
+    if (cleanWhatsapp)    contextObj.whatsapp  = cleanWhatsapp;
 
     const tags = ['book', `grade_${grade}`];
     if (categoryProvided) tags.push(cleanCategory.toLowerCase().replace(/\s+/g, '_'));
-    if (parsedPrice > 0) tags.push('paid');
-
+    if (cleanWhatsapp)    tags.push('whatsapp_required');
 
     await updateResourceContext(publicId, 'raw', contextObj, tags);
 
-    // Self-verify: read the resource back immediately to confirm context stuck.
-    // This check is now STRICT — if a category was provided but didn't come
-    // back, this reports failure honestly instead of silently passing.
-    const check = await cloudinary.api.resource(publicId, { resource_type: 'raw', type: 'upload', context: true });
+    const check       = await cloudinary.api.resource(publicId, { resource_type: 'raw', type: 'upload', context: true });
     const verifiedCtx = parseContext(check.context);
-    console.log(`[UPDATE book] ${publicId} wrote →`, JSON.stringify(contextObj), 'readback →', JSON.stringify(verifiedCtx));
+    console.log(`[UPDATE book] ${publicId} readback →`, JSON.stringify(verifiedCtx));
 
     const gradeOk    = verifiedCtx.grade === String(grade);
     const titleOk    = verifiedCtx.title === String(title);
     const categoryOk = categoryProvided ? (verifiedCtx.category === cleanCategory) : true;
-    const priceOk    = parsedPrice > 0 ? (verifiedCtx.price === String(parsedPrice.toFixed(2))) : true;
+    const whatsappOk = cleanWhatsapp    ? (verifiedCtx.whatsapp  === cleanWhatsapp)  : true;
 
-    if (!gradeOk || !titleOk || !categoryOk || !priceOk) {
+    if (!gradeOk || !titleOk || !categoryOk || !whatsappOk) {
       return res.status(500).json({
-        error: `Update did not fully persist. grade_ok=${gradeOk} title_ok=${titleOk} category_ok=${categoryOk} price_ok=${priceOk}. ` +
-               `Sent: ${JSON.stringify(contextObj)} — Cloudinary has: ${JSON.stringify(verifiedCtx)}`,
+        error: `Update did not fully persist. Sent: ${JSON.stringify(contextObj)} — Cloudinary has: ${JSON.stringify(verifiedCtx)}`,
       });
     }
 
@@ -402,177 +393,6 @@ app.delete('/api/books/:publicId(*)', async (req, res) => {
   }
 });
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  PESAPAL PAYMENT
-// ═══════════════════════════════════════════════════════════════════════════
-
-const PESAPAL_ENV     = process.env.PESAPAL_ENV || 'sandbox'; // 'sandbox' or 'live'
-const PESAPAL_BASE    = PESAPAL_ENV === 'live'
-  ? 'https://pay.pesapal.com/v3'
-  : 'https://cybqa.pesapal.com/pesapalv3';
-const PESAPAL_KEY     = process.env.PESAPAL_CONSUMER_KEY;
-const PESAPAL_SECRET  = process.env.PESAPAL_CONSUMER_SECRET;
-const PESAPAL_IPN_URL = process.env.PESAPAL_IPN_URL || `${process.env.SERVER_URL || 'http://localhost:3000'}/api/payment/ipn`;
-const SERVER_URL      = process.env.SERVER_URL || 'http://localhost:3000';
-
-// In-memory order store — maps merchant_reference → { url, title, status }
-// In production you would persist this to a database, but for a lightweight
-// deployment this survives server restarts for the duration of a payment session.
-const _pendingOrders = new Map();
-
-// Step 1 — get a short-lived Pesapal OAuth token
-async function pesapalToken() {
-  const r = await fetch(`${PESAPAL_BASE}/api/Auth/RequestToken`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-    body: JSON.stringify({ consumer_key: PESAPAL_KEY, consumer_secret: PESAPAL_SECRET }),
-  });
-  const d = await r.json();
-  if (!d.token) throw new Error('Pesapal auth failed: ' + JSON.stringify(d));
-  return d.token;
-}
-
-// Step 2 — register our IPN url with Pesapal (returns ipn_id, cache it)
-let _cachedIpnId = null;
-async function getIpnId(token) {
-  if (_cachedIpnId) return _cachedIpnId;
-  const r = await fetch(`${PESAPAL_BASE}/api/URLSetup/RegisterIPN`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'Authorization': `Bearer ${token}` },
-    body: JSON.stringify({ url: PESAPAL_IPN_URL, ipn_notification_type: 'GET' }),
-  });
-  const d = await r.json();
-  if (!d.ipn_id) throw new Error('Pesapal IPN registration failed: ' + JSON.stringify(d));
-  _cachedIpnId = d.ipn_id;
-  return _cachedIpnId;
-}
-
-// Initiate a payment — called from the public app when user clicks "Pay & Download"
-app.post('/api/payment/initiate', async (req, res) => {
-  try {
-    const { bookTitle, bookUrl, amount, phoneNumber, name, network } = req.body;
-    if (!bookTitle || !bookUrl || !amount || !phoneNumber || !name || !network)
-      return res.status(400).json({ error: 'Missing required payment fields' });
-
-    const token   = await pesapalToken();
-    const ipn_id  = await getIpnId(token);
-
-    // Build a unique merchant reference for this transaction
-    const reference = `ZL-${Date.now()}-${Math.random().toString(36).slice(2,7).toUpperCase()}`;
-
-    // Store pending order so we can verify it after Pesapal redirects back
-    _pendingOrders.set(reference, { url: bookUrl, title: bookTitle, status: 'PENDING' });
-
-    // Map network selection to Pesapal mobile money type
-    const mobileType = network === 'MTN' ? 'MTN' : 'AIRTEL';
-
-    const payload = {
-      id: reference,
-      currency: 'ZMW',
-      amount: parseFloat(amount),
-      description: `ZamLearn: ${bookTitle}`,
-      callback_url: `${SERVER_URL}/api/payment/callback?ref=${reference}`,
-      notification_id: ipn_id,
-      billing_address: {
-        phone_number: phoneNumber,
-        first_name: name.split(' ')[0] || name,
-        last_name: name.split(' ').slice(1).join(' ') || '',
-        country_code: 'ZM',
-      },
-    };
-
-    const r2 = await fetch(`${PESAPAL_BASE}/api/Transactions/SubmitOrderRequest`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'Authorization': `Bearer ${token}` },
-      body: JSON.stringify(payload),
-    });
-    const d2 = await r2.json();
-    if (!d2.order_tracking_id) throw new Error('Pesapal order failed: ' + JSON.stringify(d2));
-
-    // Update our store with the Pesapal tracking id
-    _pendingOrders.set(reference, { url: bookUrl, title: bookTitle, status: 'PENDING', tracking_id: d2.order_tracking_id });
-
-    res.json({
-      success: true,
-      redirect_url: d2.redirect_url,
-      order_tracking_id: d2.order_tracking_id,
-      merchant_reference: reference,
-    });
-  } catch (err) {
-    console.error('[PAYMENT initiate] error:', err.message);
-    res.status(500).json({ error: err.message || 'Payment initiation failed' });
-  }
-});
-
-// Pesapal IPN — Pesapal calls this URL to notify us of status changes
-app.get('/api/payment/ipn', async (req, res) => {
-  try {
-    const { orderTrackingId, orderMerchantReference } = req.query;
-    if (!orderTrackingId || !orderMerchantReference) return res.status(400).send('Missing params');
-
-    const token = await pesapalToken();
-    const r = await fetch(`${PESAPAL_BASE}/api/Transactions/GetTransactionStatus?orderTrackingId=${orderTrackingId}`, {
-      headers: { 'Accept': 'application/json', 'Authorization': `Bearer ${token}` },
-    });
-    const d = await r.json();
-
-    const order = _pendingOrders.get(orderMerchantReference);
-    if (order) {
-      order.status = d.payment_status_description || 'UNKNOWN';
-      _pendingOrders.set(orderMerchantReference, order);
-    }
-    res.json({ orderNotificationType: 'IPNCHANGE', orderTrackingId, orderMerchantReference, status: 200 });
-  } catch (err) {
-    console.error('[PAYMENT ipn] error:', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Poll payment status — called by the public app every few seconds after redirect
-app.get('/api/payment/status', async (req, res) => {
-  try {
-    const { ref } = req.query;
-    if (!ref) return res.status(400).json({ error: 'ref required' });
-
-    const order = _pendingOrders.get(ref);
-    if (!order) return res.status(404).json({ error: 'Order not found' });
-
-    // Always fetch live status from Pesapal — never trust only our in-memory store
-    const token = await pesapalToken();
-    const r = await fetch(`${PESAPAL_BASE}/api/Transactions/GetTransactionStatus?orderTrackingId=${order.tracking_id}`, {
-      headers: { 'Accept': 'application/json', 'Authorization': `Bearer ${token}` },
-    });
-    const d = await r.json();
-
-    const paid = d.payment_status_description === 'Completed';
-    order.status = d.payment_status_description || order.status;
-    _pendingOrders.set(ref, order);
-
-    res.json({
-      success: true,
-      paid,
-      status: order.status,
-      // Only return the download URL if the payment is confirmed
-      download_url: paid ? order.url : null,
-    });
-  } catch (err) {
-    console.error('[PAYMENT status] error:', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Pesapal callback — user is redirected here after completing payment on Pesapal
-// We just send a script that posts the result to the parent window (our app).
-app.get('/api/payment/callback', (req, res) => {
-  const { ref } = req.query;
-  res.send(`<!DOCTYPE html><html><body>
-    <script>
-      if(window.opener){ window.opener.postMessage({ type:'PESAPAL_CALLBACK', ref:'${ref}' }, '*'); }
-      window.close();
-    </script>
-    <p>Processing payment… you can close this window.</p>
-  </body></html>`);
-});
 
 // ── Error handler ──────────────────────────────────────────────────────────
 app.use((err, _req, res, _next) => {
