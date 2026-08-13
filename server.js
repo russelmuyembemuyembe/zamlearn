@@ -127,7 +127,7 @@ app.post('/api/pastpapers/upload', upload.single('pdf'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No PDF file provided' });
 
-    const { grade, subject, year } = req.body;
+    const { grade, subject, year, examtype } = req.body;
     if (!grade || !subject || !year)
       return res.status(400).json({ error: 'grade, subject, and year are required' });
 
@@ -136,7 +136,9 @@ app.post('/api/pastpapers/upload', upload.single('pdf'), async (req, res) => {
     const publicId     = `zamlearn/pastpapers/${safeGrade}/${year}/${safeSubject}_${Date.now()}`;
 
     const contextObj = { grade: String(grade), subject: String(subject), year: String(year) };
+    if (examtype) contextObj.examtype = String(examtype);
     const tags = ['pastpaper', `grade_${grade}`, `year_${year}`, String(subject).toLowerCase()];
+    if (examtype) tags.push(String(examtype).toLowerCase());
 
     const result = await uploadToCloudinary(req.file.buffer, {
       resource_type: 'raw',
@@ -169,7 +171,7 @@ app.post('/api/pastpapers/upload', upload.single('pdf'), async (req, res) => {
 // List past papers (with optional filters)
 app.get('/api/pastpapers', async (req, res) => {
   try {
-    const { grade, subject, year } = req.query;
+    const { grade, subject, year, examtype } = req.query;
 
     const resources = await fetchAllResources('zamlearn/pastpapers/');
 
@@ -185,17 +187,19 @@ app.get('/api/pastpapers', async (req, res) => {
       return {
         public_id:  r.public_id,
         url:        signedUrl,
-        grade:      ctx.grade   || '',
-        subject:    ctx.subject || '',
-        year:       ctx.year    || '',
+        grade:      ctx.grade    || '',
+        subject:    ctx.subject  || '',
+        year:       ctx.year     || '',
+        examtype:   ctx.examtype || '',
         bytes:      r.bytes,
         created_at: r.created_at,
       };
     });
 
-    if (grade)   papers = papers.filter(p => p.grade === String(grade));
-    if (year)    papers = papers.filter(p => p.year  === String(year));
-    if (subject) papers = papers.filter(p => p.subject.toLowerCase() === String(subject).toLowerCase());
+    if (grade)    papers = papers.filter(p => p.grade === String(grade));
+    if (year)     papers = papers.filter(p => p.year  === String(year));
+    if (subject)  papers = papers.filter(p => p.subject.toLowerCase() === String(subject).toLowerCase());
+    if (examtype) papers = papers.filter(p => p.examtype.toLowerCase() === String(examtype).toLowerCase());
 
     res.json({ success: true, count: papers.length, data: papers });
   } catch (err) {
@@ -207,19 +211,19 @@ app.get('/api/pastpapers', async (req, res) => {
 // Update a past paper's metadata
 app.put('/api/pastpapers/update', async (req, res) => {
   try {
-    const { publicId, grade, subject, year } = req.body;
+    const { publicId, grade, subject, year, examtype } = req.body;
     if (!publicId || !grade || !subject || !year)
       return res.status(400).json({ error: 'publicId, grade, subject, and year are required' });
 
     const contextObj = { grade: String(grade), subject: String(subject), year: String(year) };
+    if (examtype) contextObj.examtype = String(examtype);
     const tags = ['pastpaper', `grade_${grade}`, `year_${year}`, String(subject).toLowerCase()];
+    if (examtype) tags.push(String(examtype).toLowerCase());
 
     await updateResourceContext(publicId, 'raw', contextObj, tags);
 
-    // Self-verify: read the resource back immediately to confirm context stuck
     const check = await cloudinary.api.resource(publicId, { resource_type: 'raw', type: 'upload', context: true });
     const verifiedCtx = parseContext(check.context);
-    console.log(`[UPDATE paper] ${publicId} wrote →`, JSON.stringify(contextObj), 'readback →', JSON.stringify(verifiedCtx));
 
     const ok = verifiedCtx.grade === String(grade) && verifiedCtx.subject === String(subject) && verifiedCtx.year === String(year);
     if (!ok) {
