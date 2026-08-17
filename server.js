@@ -53,6 +53,16 @@ function parseContext(rawContext) {
   return rawContext;
 }
 
+// Cloudinary serializes context objects into a single string as
+// "key=value|key=value|...". If any VALUE contains a literal "|" or "=",
+// it corrupts that string and can silently truncate/drop whatever comes
+// after it (e.g. a title containing "|" can wipe out "whatsapp" since
+// title is serialized before whatsapp). Strip those characters so this
+// can never happen, on every value we ever put into a context object.
+function sanitizeContextValue(v) {
+  return String(v).replace(/[|=]/g, '').trim();
+}
+
 // Upload a buffer to Cloudinary via stream
 function uploadToCloudinary(buffer, options) {
   return new Promise((resolve, reject) => {
@@ -135,8 +145,12 @@ app.post('/api/pastpapers/upload', upload.single('pdf'), async (req, res) => {
     const safeSubject = String(subject).replace(/\s+/g, '_');
     const publicId     = `zamlearn/pastpapers/${safeGrade}/${year}/${safeSubject}_${Date.now()}`;
 
-    const contextObj = { grade: String(grade), subject: String(subject), year: String(year) };
-    if (examtype) contextObj.examtype = String(examtype);
+    const contextObj = {
+      grade: sanitizeContextValue(grade),
+      subject: sanitizeContextValue(subject),
+      year: sanitizeContextValue(year),
+    };
+    if (examtype) contextObj.examtype = sanitizeContextValue(examtype);
     const tags = ['pastpaper', `grade_${grade}`, `year_${year}`, String(subject).toLowerCase()];
     if (examtype) tags.push(String(examtype).toLowerCase());
 
@@ -215,8 +229,12 @@ app.put('/api/pastpapers/update', async (req, res) => {
     if (!publicId || !grade || !subject || !year)
       return res.status(400).json({ error: 'publicId, grade, subject, and year are required' });
 
-    const contextObj = { grade: String(grade), subject: String(subject), year: String(year) };
-    if (examtype) contextObj.examtype = String(examtype);
+    const contextObj = {
+      grade: sanitizeContextValue(grade),
+      subject: sanitizeContextValue(subject),
+      year: sanitizeContextValue(year),
+    };
+    if (examtype) contextObj.examtype = sanitizeContextValue(examtype);
     const tags = ['pastpaper', `grade_${grade}`, `year_${year}`, String(subject).toLowerCase()];
     if (examtype) tags.push(String(examtype).toLowerCase());
 
@@ -268,13 +286,18 @@ app.post('/api/books/upload', upload.single('pdf'), async (req, res) => {
     const safeTitle = String(title).replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_-]/g, '');
     const publicId  = `zamlearn/books/${safeGrade}/${safeTitle}_${Date.now()}`;
 
-    const contextObj = { grade: String(grade), title: String(title) };
-    if (category) contextObj.category = String(category);
-    if (whatsapp) contextObj.whatsapp = String(whatsapp).trim();
+    const contextObj = {
+      grade: sanitizeContextValue(grade),
+      title: sanitizeContextValue(title),
+    };
+    if (category) contextObj.category = sanitizeContextValue(category);
+    if (whatsapp) contextObj.whatsapp = sanitizeContextValue(whatsapp);
 
     const tags = ['book', `grade_${grade}`];
     if (category) tags.push(String(category).toLowerCase().replace(/\s+/g, '_'));
     if (whatsapp) tags.push('whatsapp_required');
+
+    console.log(`[UPLOAD book] context →`, JSON.stringify(contextObj));
 
     const result = await uploadToCloudinary(req.file.buffer, {
       resource_type: 'raw',
@@ -350,12 +373,17 @@ app.put('/api/books/update', async (req, res) => {
       return res.status(400).json({ error: 'publicId, grade, and title are required' });
 
     const categoryProvided = typeof category === 'string' && category.trim().length > 0;
-    const cleanCategory    = categoryProvided ? category.trim() : '';
-    const cleanWhatsapp    = typeof whatsapp === 'string' ? whatsapp.trim() : '';
+    const cleanCategory    = categoryProvided ? sanitizeContextValue(category) : '';
+    const cleanWhatsapp    = typeof whatsapp === 'string' ? sanitizeContextValue(whatsapp) : '';
 
-    const contextObj = { grade: String(grade), title: String(title) };
+    const contextObj = {
+      grade: sanitizeContextValue(grade),
+      title: sanitizeContextValue(title),
+    };
     if (categoryProvided) contextObj.category = cleanCategory;
     if (cleanWhatsapp)    contextObj.whatsapp  = cleanWhatsapp;
+
+    console.log(`[UPDATE book] ${publicId} sending context →`, JSON.stringify(contextObj));
 
     const tags = ['book', `grade_${grade}`];
     if (categoryProvided) tags.push(cleanCategory.toLowerCase().replace(/\s+/g, '_'));
