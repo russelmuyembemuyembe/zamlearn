@@ -80,6 +80,18 @@ function uploadToCloudinary(buffer, options) {
 // transformations). The correct, documented way to update context on an
 // existing asset is the Admin API's `update` method: cloudinary.api.update().
 // Source: https://cloudinary.com/documentation/admin_api#update_details_of_an_existing_resource
+//
+// CRITICAL: unlike the upload endpoint, the Admin API's `update` action does
+// NOT reliably persist context when given a plain JS object — it silently
+// no-ops on some fields. It needs a raw "key=value|key=value" STRING. Values
+// are already pre-sanitized (no "|" or "=") by sanitizeContextValue, so a
+// plain join is safe here.
+function contextObjToString(contextObj) {
+  return Object.entries(contextObj)
+    .map(([k, v]) => `${k}=${v}`)
+    .join('|');
+}
+
 function updateResourceContext(publicId, resourceType, contextObj, tags) {
   return new Promise((resolve, reject) => {
     cloudinary.api.update(
@@ -87,7 +99,7 @@ function updateResourceContext(publicId, resourceType, contextObj, tags) {
       {
         resource_type: resourceType, // 'raw'
         type: 'upload',
-        context: contextObj,          // plain object — Admin API handles key=value encoding
+        context: contextObjToString(contextObj), // STRING form — object form silently drops fields
         tags: tags || undefined,      // pass the real array — toArray() only wraps non-arrays, doesn't split strings
       },
       (err, result) => {
