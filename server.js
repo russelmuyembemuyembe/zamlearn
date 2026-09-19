@@ -290,7 +290,7 @@ app.post('/api/books/upload', upload.single('pdf'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No PDF file provided' });
 
-    const { grade, title, category, whatsapp } = req.body;
+    const { grade, title, category, whatsapp, downloadcode } = req.body;
     if (!grade || !title)
       return res.status(400).json({ error: 'grade and title are required' });
 
@@ -304,10 +304,12 @@ app.post('/api/books/upload', upload.single('pdf'), async (req, res) => {
     };
     if (category) contextObj.category = sanitizeContextValue(category);
     if (whatsapp) contextObj.whatsapp = sanitizeContextValue(whatsapp);
+    if (downloadcode) contextObj.downloadcode = sanitizeContextValue(downloadcode);
 
     const tags = ['book', `grade_${grade}`];
-    if (category) tags.push(String(category).toLowerCase().replace(/\s+/g, '_'));
-    if (whatsapp) tags.push('whatsapp_required');
+    if (category)     tags.push(String(category).toLowerCase().replace(/\s+/g, '_'));
+    if (whatsapp)     tags.push('whatsapp_required');
+    if (downloadcode) tags.push('has_code');
 
     console.log(`[UPLOAD book] context →`, JSON.stringify(contextObj));
 
@@ -330,6 +332,7 @@ app.post('/api/books/upload', upload.single('pdf'), async (req, res) => {
         title:     String(title),
         category:  category  ? String(category)  : '',
         whatsapp:  whatsapp  ? String(whatsapp).trim() : '',
+        downloadcode: downloadcode ? sanitizeContextValue(downloadcode) : '',
         bytes:     result.bytes,
       },
     });
@@ -342,12 +345,18 @@ app.post('/api/books/upload', upload.single('pdf'), async (req, res) => {
 // List books
 app.get('/api/books', async (req, res) => {
   try {
-    const { grade, category } = req.query;
+    const { grade, category, admin } = req.query;
+
+    // The public app must NEVER receive the raw download code — otherwise anyone
+    // could read it out of the JSON response. The admin panel asks for it
+    // explicitly with ?admin=1 so it can display and edit codes.
+    const isAdmin = String(admin) === '1';
 
     const resources = await fetchAllResources('zamlearn/books/');
 
     let books = resources.map(r => {
       const ctx = parseContext(r.context);
+      const code = (ctx.downloadcode || '').trim();
       const signedUrl = cloudinary.url(r.public_id, {
         resource_type: 'raw',
         type: 'upload',
@@ -362,6 +371,8 @@ app.get('/api/books', async (req, res) => {
         title:      ctx.title     || '',
         category:   ctx.category  || '',
         whatsapp:   ctx.whatsapp  || '',
+        has_code:   !!code,                        // public: only "is there a code?"
+        downloadcode: isAdmin ? code : undefined,  // admin only — dropped from JSON otherwise
         bytes:      r.bytes,
         created_at: r.created_at,
       };
@@ -380,13 +391,15 @@ app.get('/api/books', async (req, res) => {
 // Update a book's metadata
 app.put('/api/books/update', async (req, res) => {
   try {
-    const { publicId, grade, title, category, whatsapp } = req.body;
+    const { publicId, grade, title, category, whatsapp, downloadcode } = req.body;
     if (!publicId || !grade || !title)
       return res.status(400).json({ error: 'publicId, grade, and title are required' });
 
     const categoryProvided = typeof category === 'string' && category.trim().length > 0;
     const cleanCategory    = categoryProvided ? sanitizeContextValue(category) : '';
     const cleanWhatsapp    = typeof whatsapp === 'string' ? sanitizeContextValue(whatsapp) : '';
+    // Sending an empty downloadcode removes it (context is replaced, not merged).
+    const cleanCode        = typeof downloadcode === 'string' ? sanitizeContextValue(downloadcode) : '';
 
     const contextObj = {
       grade: sanitizeContextValue(grade),
@@ -394,12 +407,14 @@ app.put('/api/books/update', async (req, res) => {
     };
     if (categoryProvided) contextObj.category = cleanCategory;
     if (cleanWhatsapp)    contextObj.whatsapp  = cleanWhatsapp;
+    if (cleanCode)        contextObj.downloadcode = cleanCode;
 
     console.log(`[UPDATE book] ${publicId} sending context →`, JSON.stringify(contextObj));
 
     const tags = ['book', `grade_${grade}`];
     if (categoryProvided) tags.push(cleanCategory.toLowerCase().replace(/\s+/g, '_'));
     if (cleanWhatsapp)    tags.push('whatsapp_required');
+    if (cleanCode)        tags.push('has_code');
 
     await updateResourceContext(publicId, 'raw', contextObj, tags);
 
@@ -411,8 +426,9 @@ app.put('/api/books/update', async (req, res) => {
     const titleOk    = verifiedCtx.title === String(title);
     const categoryOk = categoryProvided ? (verifiedCtx.category === cleanCategory) : true;
     const whatsappOk = cleanWhatsapp    ? (verifiedCtx.whatsapp  === cleanWhatsapp)  : true;
+    const codeOk     = cleanCode        ? (verifiedCtx.downloadcode === cleanCode)   : true;
 
-    if (!gradeOk || !titleOk || !categoryOk || !whatsappOk) {
+    if (!gradeOk || !titleOk || !categoryOk || !whatsappOk || !codeOk) {
       return res.status(500).json({
         error: `Update did not fully persist. Sent: ${JSON.stringify(contextObj)} — Cloudinary has: ${JSON.stringify(verifiedCtx)}`,
       });
@@ -422,6 +438,82 @@ app.put('/api/books/update', async (req, res) => {
   } catch (err) {
     console.error('[UPDATE book] error:', err);
     res.status(500).json({ error: err.message || 'Update failed' });
+  }
+});
+
+// ── Verify a download code ────────────────────────────────────────────────
+// The public app sends { publicId, code }. If the code matches the one the
+// admin saved on that book, we hand back a fresh signed URL. The code itself
+// never leaves the server, so it can't be read out of any list response.
+//
+// Simple in-memory brute-force guard: a short code is easy to guess by
+// scripting, so each IP gets a limited number of WRONG tries per window.
+const _codeAttempts = new Map(); // ip → { count, resetAt }
+const MAX_TRIES   = 10;
+const TRY_WINDOW  = 10 * 60 * 1000; // 10 minutes
+
+function tooManyTries(ip) {
+  const rec = _codeAttempts.get(ip);
+  if (!rec || Date.now() > rec.resetAt) return false;
+  return rec.count >= MAX_TRIES;
+}
+function noteFailedTry(ip) {
+  const rec = _codeAttempts.get(ip);
+  if (!rec || Date.now() > rec.resetAt) {
+    _codeAttempts.set(ip, { count: 1, resetAt: Date.now() + TRY_WINDOW });
+  } else {
+    rec.count++;
+  }
+}
+
+app.post('/api/books/verify-code', async (req, res) => {
+  try {
+    const ip = req.headers['x-forwarded-for'] || req.ip || 'unknown';
+    if (tooManyTries(ip))
+      return res.status(429).json({ error: 'Too many wrong codes. Please try again in 10 minutes.' });
+
+    const { publicId, code } = req.body;
+    if (!publicId || !code)
+      return res.status(400).json({ error: 'publicId and code are required' });
+
+    let resource;
+    try {
+      resource = await cloudinary.api.resource(publicId, {
+        resource_type: 'raw', type: 'upload', context: true,
+      });
+    } catch (e) {
+      return res.status(404).json({ error: 'Book not found' });
+    }
+
+    const ctx      = parseContext(resource.context);
+    const realCode = (ctx.downloadcode || '').trim();
+
+    if (!realCode)
+      return res.status(404).json({ error: 'This book has no download code yet. Please contact us on WhatsApp.' });
+
+    // Codes are stored already sanitized, so sanitize the input the same way
+    // before comparing. Case-insensitive so "zl-7k4q2" works too.
+    const given = sanitizeContextValue(code);
+    if (given.toLowerCase() !== realCode.toLowerCase()) {
+      noteFailedTry(ip);
+      return res.status(403).json({ error: 'Invalid download code' });
+    }
+
+    _codeAttempts.delete(ip); // correct code clears the counter
+
+    const signedUrl = cloudinary.url(publicId, {
+      resource_type: 'raw',
+      type: 'upload',
+      secure: true,
+      sign_url: true,
+      expires_at: Math.floor(Date.now() / 1000) + 3600,
+    });
+
+    console.log(`[VERIFY code] unlocked ${publicId}`);
+    res.json({ success: true, url: signedUrl, title: ctx.title || '', grade: ctx.grade || '' });
+  } catch (err) {
+    console.error('[VERIFY code] error:', err);
+    res.status(500).json({ error: err.message || 'Could not verify code' });
   }
 });
 
