@@ -572,8 +572,11 @@ function saveStats() {
 setInterval(saveStats, 60 * 1000).unref();
 process.on('SIGTERM', () => { saveStats(); process.exit(0); });
 
-const dayKey  = (t = Date.now()) => new Date(t).toISOString().slice(0, 10);
-const hourKey = (t = Date.now()) => new Date(t).toISOString().slice(0, 13);
+// Zambia time (CAT = UTC+2, no daylight saving). Day/hour buckets use it so
+// "today" and the hourly chart match what students and you actually see.
+const TZ_OFFSET = 2 * 3600 * 1000;
+const dayKey  = (t = Date.now()) => new Date(t + TZ_OFFSET).toISOString().slice(0, 10);
+const hourKey = (t = Date.now()) => new Date(t + TZ_OFFSET).toISOString().slice(0, 13);
 const bump = (obj, key, n = 1) => { if (key) obj[key] = (obj[key] || 0) + n; };
 const clean = (v, max = 60) => String(v == null ? '' : v).replace(/[^\w\s.\-&()+/:]/g, '').trim().slice(0, max);
 
@@ -620,7 +623,12 @@ function touchSession(req, sid, section) {
       bump(totals.sections, section);
     }
   }
-  bump(totals.hourly, hourKey());
+  const hk = hourKey(now);
+  if (s.hourKey !== hk) {                       // count each student once per hour
+    s.hourKey = hk;
+    if (!Array.isArray(totals.hourly[hk])) totals.hourly[hk] = [];
+    if (!totals.hourly[hk].includes(s.sid)) totals.hourly[hk].push(s.sid);
+  }
   const on = onlineCount();
   if (on > totals.peakOnline) { totals.peakOnline = on; totals.peakAt = now; }
   return s;
@@ -669,13 +677,15 @@ app.get('/api/admin/stats', (_req, res) => {
   const hours = [];
   for (let i = 23; i >= 0; i--) {
     const k = hourKey(now - i * 3600000);
-    hours.push({ hour: k.slice(11) + ':00', pings: totals.hourly[k] || 0 });
+    const v = totals.hourly[k];
+    hours.push({ hour: k.slice(11) + ':00', students: Array.isArray(v) ? v.length : 0 });
   }
   const today = totals.daily[dayKey()] || { visits: 0, uniq: [] };
   const mix = key => { const o = {}; online.forEach(s => bump(o, s[key])); return top(o, 6); };
 
   res.json({
     success: true,
+    version: 'analytics-v3',      // shown in the admin so you can tell which server is running
     serverTime: now,
     since: totals.since,
     onlineNow: online.length,
