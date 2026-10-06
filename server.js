@@ -140,6 +140,18 @@ async function fetchAllResources(prefix) {
   return allResources;
 }
 
+
+// Files uploaded before the rename live under "zamlearn/…" in Cloudinary and
+// cannot be moved by the app, so listings read BOTH folders. New uploads go
+// to "betastudu/…". Nothing already uploaded disappears.
+async function fetchBothPrefixes(kind) {
+  const [fresh, legacy] = await Promise.all([
+    fetchAllResources(`betastudu/${kind}/`),
+    fetchAllResources(`zamlearn/${kind}/`).catch(() => []),
+  ]);
+  return fresh.concat(legacy);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  PAST PAPERS
 // ═══════════════════════════════════════════════════════════════════════════
@@ -155,7 +167,7 @@ app.post('/api/pastpapers/upload', upload.single('pdf'), async (req, res) => {
 
     const safeGrade   = String(grade).replace(/\s+/g, '_');
     const safeSubject = String(subject).replace(/\s+/g, '_');
-    const publicId     = `zamlearn/pastpapers/${safeGrade}/${year}/${safeSubject}_${Date.now()}`;
+    const publicId     = `betastudu/pastpapers/${safeGrade}/${year}/${safeSubject}_${Date.now()}`;
 
     const contextObj = {
       grade: sanitizeContextValue(grade),
@@ -199,7 +211,7 @@ app.get('/api/pastpapers', async (req, res) => {
   try {
     const { grade, subject, year, examtype } = req.query;
 
-    const resources = await fetchAllResources('zamlearn/pastpapers/');
+    const resources = await fetchBothPrefixes('pastpapers');
 
     let papers = resources.map(r => {
       const ctx = parseContext(r.context);
@@ -296,7 +308,7 @@ app.post('/api/books/upload', upload.single('pdf'), async (req, res) => {
 
     const safeGrade = String(grade).replace(/\s+/g, '_');
     const safeTitle = String(title).replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_-]/g, '');
-    const publicId  = `zamlearn/books/${safeGrade}/${safeTitle}_${Date.now()}`;
+    const publicId  = `betastudu/books/${safeGrade}/${safeTitle}_${Date.now()}`;
 
     const contextObj = {
       grade: sanitizeContextValue(grade),
@@ -352,7 +364,7 @@ app.get('/api/books', async (req, res) => {
     // explicitly with ?admin=1 so it can display and edit codes.
     const isAdmin = String(admin) === '1';
 
-    const resources = await fetchAllResources('zamlearn/books/');
+    const resources = await fetchBothPrefixes('books');
 
     let books = resources.map(r => {
       const ctx = parseContext(r.context);
@@ -530,12 +542,173 @@ app.delete('/api/books/:publicId(*)', async (req, res) => {
 });
 
 
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  ANALYTICS  (in-memory, saved to stats.json so restarts don't wipe it)
+// ═══════════════════════════════════════════════════════════════════════════
+const fs   = require('fs');
+const path = require('path');
+const STATS_FILE   = path.join(__dirname, 'stats.json');
+const ONLINE_MS    = 70 * 1000;          // "online" = heartbeat in the last 70 s
+const SESSION_KEEP = 24 * 3600 * 1000;   // keep session rows for 24 h
+const SECTIONS = new Set(['papers','books','timetable','notes','study','timer','grades','formulas','flashcards','exams','home','other']);
+
+app.set('trust proxy', true);            // real client IP behind Render's proxy
+
+const sessions = new Map();              // sid -> live session
+let totals = {
+  since: Date.now(), visits: 0, peakOnline: 0, peakAt: 0,
+  sections: {}, searches: {}, downloads: 0, downloadItems: {},
+  daily: {},                             // 'YYYY-MM-DD' -> { visits, uniq:[sid...] }
+  hourly: {},                            // 'YYYY-MM-DDTHH' -> pings
+};
+try {
+  if (fs.existsSync(STATS_FILE)) totals = Object.assign(totals, JSON.parse(fs.readFileSync(STATS_FILE, 'utf8')));
+} catch (e) { console.warn('[stats] could not load stats.json:', e.message); }
+
+function saveStats() {
+  try { fs.writeFileSync(STATS_FILE, JSON.stringify(totals)); } catch (_) {}
+}
+setInterval(saveStats, 60 * 1000).unref();
+process.on('SIGTERM', () => { saveStats(); process.exit(0); });
+
+const dayKey  = (t = Date.now()) => new Date(t).toISOString().slice(0, 10);
+const hourKey = (t = Date.now()) => new Date(t).toISOString().slice(0, 13);
+const bump = (obj, key, n = 1) => { if (key) obj[key] = (obj[key] || 0) + n; };
+const clean = (v, max = 60) => String(v == null ? '' : v).replace(/[^\w\s.\-&()+/:]/g, '').trim().slice(0, max);
+
+function maskIp(ip) {
+  ip = String(ip || '').replace('::ffff:', '');
+  if (ip.includes(':')) return ip.split(':').slice(0, 3).join(':') + ':…';
+  const p = ip.split('.');
+  return p.length === 4 ? `${p[0]}.${p[1]}.${p[2]}.x` : 'unknown';
+}
+function parseUA(ua = '') {
+  const device  = /Mobi|Android|iPhone|iPad/i.test(ua) ? (/iPad|Tablet/i.test(ua) ? 'Tablet' : 'Phone') : 'Desktop';
+  const os      = /Android/i.test(ua) ? 'Android' : /iPhone|iPad|iOS/i.test(ua) ? 'iOS'
+                : /Windows/i.test(ua) ? 'Windows' : /Mac OS/i.test(ua) ? 'macOS' : /Linux/i.test(ua) ? 'Linux' : 'Other';
+  const browser = /Edg\//i.test(ua) ? 'Edge' : /OPR\//i.test(ua) ? 'Opera' : /Chrome\//i.test(ua) ? 'Chrome'
+                : /Firefox\//i.test(ua) ? 'Firefox' : /Safari\//i.test(ua) ? 'Safari' : 'Other';
+  return { device, os, browser };
+}
+function onlineCount() {
+  const now = Date.now(); let n = 0;
+  sessions.forEach(s => { if (now - s.lastSeen < ONLINE_MS) n++; });
+  return n;
+}
+function touchSession(req, sid, section) {
+  sid = clean(sid, 40);
+  if (!sid) return null;
+  const now = Date.now();
+  let s = sessions.get(sid);
+  if (!s) {
+    s = { sid, first: now, lastSeen: now, section: 'home', trail: [], pings: 0,
+          ip: maskIp(req.ip), ...parseUA(req.get('user-agent') || '') };
+    sessions.set(sid, s);
+    totals.visits++;
+    const d = (totals.daily[dayKey()] ||= { visits: 0, uniq: [] });
+    d.visits++;
+    if (!d.uniq.includes(sid)) d.uniq.push(sid);
+  }
+  s.lastSeen = now; s.pings++;
+  if (section) {
+    section = SECTIONS.has(section) ? section : 'other';
+    if (section !== s.section || !s.trail.length) {
+      s.section = section;
+      s.trail.push({ section, at: now });
+      if (s.trail.length > 15) s.trail.shift();
+      bump(totals.sections, section);
+    }
+  }
+  bump(totals.hourly, hourKey());
+  const on = onlineCount();
+  if (on > totals.peakOnline) { totals.peakOnline = on; totals.peakAt = now; }
+  return s;
+}
+setInterval(() => {                       // housekeeping
+  const cut = Date.now() - SESSION_KEEP;
+  sessions.forEach((s, k) => { if (s.lastSeen < cut) sessions.delete(k); });
+  const keepDays = Object.keys(totals.daily).sort().slice(-60);
+  Object.keys(totals.daily).forEach(k => { if (!keepDays.includes(k)) delete totals.daily[k]; });
+  const keepHours = Object.keys(totals.hourly).sort().slice(-72);
+  Object.keys(totals.hourly).forEach(k => { if (!keepHours.includes(k)) delete totals.hourly[k]; });
+}, 10 * 60 * 1000).unref();
+
+// Public tracking endpoints — always answer 204 so a failing tracker can
+// never produce an error or slow down the student app.
+app.post('/api/track/ping', (req, res) => {
+  try { touchSession(req, req.body.sid, clean(req.body.section, 20)); } catch (_) {}
+  res.sendStatus(204);
+});
+app.post('/api/track/event', (req, res) => {
+  try {
+    const { sid, type, label, section } = req.body || {};
+    touchSession(req, sid, clean(section, 20));
+    const l = clean(label, 80);
+    if (type === 'search' && l) bump(totals.searches, l);
+    if (type === 'download') { totals.downloads++; bump(totals.downloadItems, l || 'Unknown'); }
+  } catch (_) {}
+  res.sendStatus(204);
+});
+
+// Admin statistics
+app.get('/api/admin/stats', (_req, res) => {
+  const now = Date.now();
+  const online = [];
+  sessions.forEach(s => { if (now - s.lastSeen < ONLINE_MS) online.push(s); });
+  online.sort((a, b) => b.lastSeen - a.lastSeen);
+
+  const top = (obj, n = 8) => Object.entries(obj).sort((a, b) => b[1] - a[1]).slice(0, n).map(([name, count]) => ({ name, count }));
+
+  const days = [];
+  for (let i = 6; i >= 0; i--) {
+    const k = dayKey(now - i * 86400000);
+    const d = totals.daily[k] || { visits: 0, uniq: [] };
+    days.push({ day: k, visits: d.visits, unique: d.uniq.length });
+  }
+  const hours = [];
+  for (let i = 23; i >= 0; i--) {
+    const k = hourKey(now - i * 3600000);
+    hours.push({ hour: k.slice(11) + ':00', pings: totals.hourly[k] || 0 });
+  }
+  const today = totals.daily[dayKey()] || { visits: 0, uniq: [] };
+  const mix = key => { const o = {}; online.forEach(s => bump(o, s[key])); return top(o, 6); };
+
+  res.json({
+    success: true,
+    serverTime: now,
+    since: totals.since,
+    onlineNow: online.length,
+    peakOnline: totals.peakOnline,
+    peakAt: totals.peakAt,
+    visitsToday: today.visits,
+    uniqueToday: today.uniq.length,
+    totalVisits: totals.visits,
+    totalDownloads: totals.downloads,
+    sections: top(totals.sections, 12),
+    searches: top(totals.searches, 8),
+    downloadsTop: top(totals.downloadItems, 8),
+    devices: mix('device'), systems: mix('os'), browsers: mix('browser'),
+    onlineBySection: (() => { const o = {}; online.forEach(s => bump(o, s.section)); return top(o, 12); })(),
+    days, hours,
+    users: online.slice(0, 100).map(s => ({
+      id: s.sid.slice(0, 6), ip: s.ip, device: s.device, os: s.os, browser: s.browser,
+      section: s.section, onlineFor: Math.round((now - s.first) / 1000),
+      idleFor: Math.round((now - s.lastSeen) / 1000),
+      trail: s.trail.slice(-5).map(t => t.section),
+    })),
+  });
+});
+
+
 // ── Error handler ──────────────────────────────────────────────────────────
-app.use((err, _req, res, _next) => {
+app.use((err, req, res, _next) => {
+  // tracking must never surface an error to the student app
+  if (req.path.startsWith('/api/track')) return res.sendStatus(204);
   console.error('[UNHANDLED]', err);
   res.status(500).json({ error: err.message || 'Internal server error' });
 });
 
 app.listen(PORT, () => {
-  console.log(`\n🟢 ZamLearn server running at http://localhost:${PORT}`);
+  console.log(`\n🟢 BetaStudu server running at http://localhost:${PORT}`);
 });
