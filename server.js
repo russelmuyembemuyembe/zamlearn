@@ -701,6 +701,7 @@ app.get('/api/admin/stats', (_req, res) => {
 });
 
 
+
 // ── Error handler ──────────────────────────────────────────────────────────
 app.use((err, req, res, _next) => {
   // tracking must never surface an error to the student app
