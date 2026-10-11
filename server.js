@@ -238,7 +238,11 @@ app.get('/api/pastpapers', async (req, res) => {
     if (year)     papers = papers.filter(p => p.year  === String(year));
     // "English" must also find papers uploaded earlier as "English Language" (and vice versa)
   const normSubject = v => String(v || '').toLowerCase().replace(/\s+language$/, '').trim();
-  if (subject)  papers = papers.filter(p => normSubject(p.subject) === normSubject(subject));
+  // Filtering by "English" also returns "English-Specimen" (a subject with an extra label added by the admin)
+  if (subject)  papers = papers.filter(p => {
+    const have = normSubject(p.subject), want = normSubject(subject);
+    return have === want || have.startsWith(want + '-');
+  });
     if (examtype) papers = papers.filter(p => p.examtype.toLowerCase() === String(examtype).toLowerCase());
 
     res.json({ success: true, count: papers.length, data: papers });
