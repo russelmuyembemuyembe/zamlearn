@@ -236,7 +236,9 @@ app.get('/api/pastpapers', async (req, res) => {
 
     if (grade)    papers = papers.filter(p => p.grade === String(grade));
     if (year)     papers = papers.filter(p => p.year  === String(year));
-    if (subject)  papers = papers.filter(p => p.subject.toLowerCase() === String(subject).toLowerCase());
+    // "English" must also find papers uploaded earlier as "English Language" (and vice versa)
+  const normSubject = v => String(v || '').toLowerCase().replace(/\s+language$/, '').trim();
+  if (subject)  papers = papers.filter(p => normSubject(p.subject) === normSubject(subject));
     if (examtype) papers = papers.filter(p => p.examtype.toLowerCase() === String(examtype).toLowerCase());
 
     res.json({ success: true, count: papers.length, data: papers });
@@ -696,7 +698,7 @@ app.get('/api/admin/stats', (_req, res) => {
     totalVisits: totals.visits,
     totalDownloads: totals.downloads,
     sections: top(totals.sections, 12),
-    searches: top(totals.searches, 8),
+    searches: top(totals.searches, 40),   // admin splits these into papers / books
     downloadsTop: top(totals.downloadItems, 8),
     devices: mix('device'), systems: mix('os'), browsers: mix('browser'),
     onlineBySection: (() => { const o = {}; online.forEach(s => bump(o, s.section)); return top(o, 12); })(),
